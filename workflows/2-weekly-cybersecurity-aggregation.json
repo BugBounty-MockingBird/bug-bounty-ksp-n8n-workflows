@@ -1,0 +1,302 @@
+{
+  "name": "Workflow 2: Weekly Cybersecurity Advancements Aggregation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "daysOfWeek": [1],
+              "hoursOfDay": 9
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger (Weekly)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialize aggregation\nconst today = new Date();\nconst weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);\n\nreturn {\n  aggregationId: `agg_${Date.now()}`,\n  startDate: weekAgo.toISOString(),\n  endDate: today.toISOString(),\n  sources: [\n    { name: 'CVE Database', url: 'https://cve.mitre.org/data/downloads/allitems-cvrf-year-2024.xml' },\n    { name: 'Cybersecurity News', url: 'https://feeds.feedburner.com/TheHackersNews' },\n    { name: 'Bug Bounty Programs', url: 'https://www.bugcrowd.com/bug-bounty-list/' },\n    { name: 'Security Advisories', url: 'https://github.com/advisories' },\n    { name: 'NIST NVD', url: 'https://nvd.nist.gov/vuln/data-feeds' }\n  ]\n};"
+      },
+      "id": "init-aggregation",
+      "name": "Initialize Aggregation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "source-splitter",
+              "name": "source",
+              "value": "={{ $json.sources }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "split-sources",
+      "name": "Split Sources",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.source.url }}",
+        "authentication": "none",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true
+            }
+          }
+        }
+      },
+      "id": "fetch-source-data",
+      "name": "Fetch Source Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse different feed formats (RSS, JSON, XML, HTML)\nconst data = $input.first().json.data || '';\nconst sourceName = $input.first().json.source.name;\nconst sourceUrl = $input.first().json.source.url;\n\nlet items = [];\n\n// Detect format and parse accordingly\nif (data.includes('<?xml') || data.includes('<rss')) {\n  // RSS/XML Feed\n  const itemRegex = /<item>([\\s\\S]*?)<\\/item>/gi;\n  const titleRegex = /<title><!\\[CDATA\\[([^\\]]+)\\]\\]><\\/title>|<title>([^<]+)<\\/title>/i;\n  const linkRegex = /<link>([^<]+)<\\/link>/i;\n  const descRegex = /<description><!\\[CDATA\\[([^\\]]+)\\]\\]><\\/description>|<description>([^<]+)<\\/description>/i;\n  const dateRegex = /<pubDate>([^<]+)<\\/pubDate>/i;\n  \n  let match;\n  while ((match = itemRegex.exec(data)) !== null) {\n    const itemXml = match[1];\n    const titleMatch = titleRegex.exec(itemXml);\n    const linkMatch = linkRegex.exec(itemXml);\n    const descMatch = descRegex.exec(itemXml);\n    const dateMatch = dateRegex.exec(itemXml);\n    \n    if (titleMatch && linkMatch) {\n      items.push({\n        title: (titleMatch[1] || titleMatch[2] || '').trim(),\n        url: linkMatch[1].trim(),\n        description: (descMatch ? (descMatch[1] || descMatch[2] || '') : '').substring(0, 500),\n        publishDate: dateMatch ? dateMatch[1] : null,\n        source: sourceName\n      });\n    }\n  }\n} else if (data.startsWith('{') || data.startsWith('[')) {\n  // JSON format\n  try {\n    const jsonData = JSON.parse(data);\n    const itemsArray = Array.isArray(jsonData) ? jsonData : (jsonData.items || jsonData.data || []);\n    \n    items = itemsArray.slice(0, 50).map(item => ({\n      title: item.title || item.name || item.summary || 'No title',\n      url: item.url || item.link || item.html_url || '',\n      description: (item.description || item.summary || '').substring(0, 500),\n      publishDate: item.published_at || item.created_at || item.date || null,\n      source: sourceName\n    }));\n  } catch (e) {\n    items = [{ error: 'Failed to parse JSON', source: sourceName }];\n  }\n} else {\n  // HTML scraping fallback\n  const h2Regex = /<h[2-3][^>]*>([^<]+)<\\/h[2-3]>/gi;\n  const matches = [...data.matchAll(h2Regex)];\n  \n  items = matches.slice(0, 20).map((m, idx) => ({\n    title: m[1].trim(),\n    url: sourceUrl + '#item-' + idx,\n    description: 'Extracted from HTML',\n    publishDate: new Date().toISOString(),\n    source: sourceName\n  }));\n}\n\nreturn {\n  aggregationId: $json.aggregationId,\n  source: sourceName,\n  sourceUrl: sourceUrl,\n  itemsFound: items.length,\n  items: items,\n  fetchedAt: new Date().toISOString()\n};"
+      },
+      "id": "parse-feed-data",
+      "name": "Parse Feed Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and categorize security topics\nconst items = $json.items || [];\n\nconst categorizedItems = items.map(item => {\n  const text = (item.title + ' ' + item.description).toLowerCase();\n  \n  // Category detection\n  let category = 'general';\n  let severity = 'info';\n  let tags = [];\n  \n  if (text.includes('cve-') || text.includes('vulnerability')) {\n    category = 'vulnerability';\n    tags.push('CVE');\n  }\n  if (text.includes('bug bounty') || text.includes('bounty')) {\n    category = 'bug-bounty';\n    tags.push('bug-bounty');\n  }\n  if (text.includes('exploit') || text.includes('zero-day') || text.includes('0day')) {\n    category = 'exploit';\n    severity = 'critical';\n    tags.push('exploit');\n  }\n  if (text.includes('patch') || text.includes('update') || text.includes('fix')) {\n    category = 'patch';\n    tags.push('patch');\n  }\n  if (text.includes('malware') || text.includes('ransomware')) {\n    category = 'malware';\n    severity = 'high';\n    tags.push('malware');\n  }\n  if (text.includes('critical') || text.includes('severe')) {\n    severity = 'critical';\n  } else if (text.includes('high')) {\n    severity = 'high';\n  } else if (text.includes('medium') || text.includes('moderate')) {\n    severity = 'medium';\n  }\n  \n  return {\n    ...item,\n    category: category,\n    severity: severity,\n    tags: tags,\n    aggregationId: $json.aggregationId\n  };\n});\n\nreturn categorizedItems;"
+      },
+      "id": "categorize-items",
+      "name": "Categorize Security Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO security_aggregations (aggregation_id, title, url, description, publish_date, source, category, severity, tags, created_at)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())\nON CONFLICT (url) DO UPDATE\nSET category = $7, severity = $8, tags = $9, last_seen_at = NOW();",
+        "additionalFields": {
+          "queryParameters": "={{ $json.aggregationId }},={{ $json.title }},={{ $json.url }},={{ $json.description }},={{ $json.publishDate }},={{ $json.source }},={{ $json.category }},={{ $json.severity }},={{ JSON.stringify($json.tags) }}"
+        }
+      },
+      "id": "store-aggregated-data",
+      "name": "Store Aggregated Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "aggregateItems",
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "aggregate-all-results",
+      "name": "Aggregate All Results",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate weekly summary report\nconst allItems = $input.all();\n\nconst stats = {\n  totalItems: allItems.length,\n  byCategory: {},\n  bySeverity: {},\n  bySource: {},\n  criticalAlerts: []\n};\n\nallItems.forEach(item => {\n  const data = item.json;\n  \n  // Count by category\n  stats.byCategory[data.category] = (stats.byCategory[data.category] || 0) + 1;\n  \n  // Count by severity\n  stats.bySeverity[data.severity] = (stats.bySeverity[data.severity] || 0) + 1;\n  \n  // Count by source\n  stats.bySource[data.source] = (stats.bySource[data.source] || 0) + 1;\n  \n  // Collect critical alerts\n  if (data.severity === 'critical') {\n    stats.criticalAlerts.push({\n      title: data.title,\n      url: data.url,\n      source: data.source\n    });\n  }\n});\n\nreturn {\n  aggregationId: $input.first().json.aggregationId,\n  weekEnding: new Date().toISOString().split('T')[0],\n  statistics: stats,\n  generatedAt: new Date().toISOString()\n};"
+      },
+      "id": "generate-summary",
+      "name": "Generate Weekly Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO weekly_summaries (aggregation_id, week_ending, total_items, statistics, generated_at, created_at)\nVALUES ($1, $2, $3, $4, $5, NOW());",
+        "additionalFields": {
+          "queryParameters": "={{ $json.aggregationId }},={{ $json.weekEnding }},={{ $json.statistics.totalItems }},={{ JSON.stringify($json.statistics) }},={{ $json.generatedAt }}"
+        }
+      },
+      "id": "store-weekly-summary",
+      "name": "Store Weekly Summary",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2050, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "channel": "={{ $env.SLACK_CHANNEL_SECURITY }}",
+        "text": "=📊 **Weekly Cybersecurity Aggregation Complete**\n\n🗓️ Week ending: {{ $json.weekEnding }}\n📈 Total items: {{ $json.statistics.totalItems }}\n\n**By Severity:**\n🔴 Critical: {{ $json.statistics.bySeverity.critical || 0 }}\n🟠 High: {{ $json.statistics.bySeverity.high || 0 }}\n🟡 Medium: {{ $json.statistics.bySeverity.medium || 0 }}\n🟢 Info: {{ $json.statistics.bySeverity.info || 0 }}\n\n**Top Categories:**\n• Vulnerabilities: {{ $json.statistics.byCategory.vulnerability || 0 }}\n• Bug Bounties: {{ $json.statistics.byCategory['bug-bounty'] || 0 }}\n• Exploits: {{ $json.statistics.byCategory.exploit || 0 }}\n• Patches: {{ $json.statistics.byCategory.patch || 0 }}\n\nView full report in the dashboard.",
+        "otherOptions": {}
+      },
+      "id": "notify-slack",
+      "name": "Notify Slack (Optional)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2050, 500],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-main",
+          "name": "Slack Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (Weekly)": {
+      "main": [
+        [
+          {
+            "node": "Initialize Aggregation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize Aggregation": {
+      "main": [
+        [
+          {
+            "node": "Split Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Sources": {
+      "main": [
+        [
+          {
+            "node": "Fetch Source Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Source Data": {
+      "main": [
+        [
+          {
+            "node": "Parse Feed Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Feed Data": {
+      "main": [
+        [
+          {
+            "node": "Categorize Security Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Categorize Security Items": {
+      "main": [
+        [
+          {
+            "node": "Store Aggregated Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Aggregated Data": {
+      "main": [
+        [
+          {
+            "node": "Aggregate All Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate All Results": {
+      "main": [
+        [
+          {
+            "node": "Generate Weekly Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Weekly Summary": {
+      "main": [
+        [
+          {
+            "node": "Store Weekly Summary",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify Slack (Optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1.0.0",
+  "meta": {
+    "instanceId": "bug-bounty-ksp"
+  },
+  "tags": [
+    {
+      "name": "aggregation",
+      "id": "agg"
+    },
+    {
+      "name": "weekly",
+      "id": "schedule"
+    },
+    {
+      "name": "cybersecurity",
+      "id": "security"
+    }
+  ]
+}
