@@ -1,0 +1,457 @@
+{
+  "name": "Workflow 5: Discord Community Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "discord-webhook",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger (Discord Events)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 400],
+      "webhookId": "discord-integration"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-digest",
+      "name": "Schedule Trigger (Digest)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Route based on trigger type\nconst isScheduled = $input.first().json.hasOwnProperty('__scheduled') || !$input.first().json.type;\n\nif (isScheduled) {\n  return {\n    triggerType: 'scheduled_digest',\n    timestamp: new Date().toISOString()\n  };\n}\n\n// Parse Discord webhook payload\nconst payload = $input.first().json;\n\nreturn {\n  triggerType: 'discord_event',\n  eventType: payload.type || payload.event_type,\n  guildId: payload.guild_id,\n  channelId: payload.channel_id,\n  userId: payload.user_id || payload.author?.id,\n  userName: payload.user_name || payload.author?.username,\n  messageContent: payload.content || payload.message?.content,\n  messageId: payload.id || payload.message?.id,\n  timestamp: payload.timestamp || new Date().toISOString(),\n  rawPayload: payload\n};"
+      },
+      "id": "route-trigger",
+      "name": "Route Trigger Type",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.triggerType }}",
+              "rightValue": "scheduled_digest",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-trigger-type",
+      "name": "Check Trigger Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  sa.title,\n  sa.url,\n  sa.description,\n  sa.source,\n  sa.category,\n  sa.severity,\n  sa.created_at\nFROM security_aggregations sa\nWHERE sa.created_at > NOW() - INTERVAL '6 hours'\n  AND (sa.severity = 'critical' OR sa.severity = 'high')\nORDER BY sa.severity DESC, sa.created_at DESC\nLIMIT 20;",
+        "additionalFields": {}
+      },
+      "id": "fetch-digest-content",
+      "name": "Fetch Digest Content",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [850, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format security digest for Discord\nconst items = $input.all().map(item => item.json);\n\nif (items.length === 0) {\n  return {\n    skip: true,\n    reason: 'No critical or high severity items in the last 6 hours'\n  };\n}\n\n// Group by severity\nconst critical = items.filter(i => i.severity === 'critical');\nconst high = items.filter(i => i.severity === 'high');\n\n// Build Discord embed\nconst embed = {\n  title: '🔒 Security Digest - Critical Updates',\n  description: `${items.length} critical and high severity items in the last 6 hours`,\n  color: critical.length > 0 ? 15158332 : 15105570, // Red for critical, orange for high\n  fields: [],\n  timestamp: new Date().toISOString(),\n  footer: {\n    text: 'Bug Bounty KSP Security Aggregator'\n  }\n};\n\nif (critical.length > 0) {\n  embed.fields.push({\n    name: '🔴 Critical Issues',\n    value: critical.slice(0, 5).map(item => \n      `**${item.title.substring(0, 100)}**\\n${item.source} | [Link](${item.url})`\n    ).join('\\n\\n'),\n    inline: false\n  });\n}\n\nif (high.length > 0) {\n  embed.fields.push({\n    name: '🟠 High Priority',\n    value: high.slice(0, 5).map(item => \n      `**${item.title.substring(0, 100)}**\\n${item.source} | [Link](${item.url})`\n    ).join('\\n\\n'),\n    inline: false\n  });\n}\n\nreturn {\n  embeds: [embed],\n  content: `@here New security digest available with ${critical.length} critical and ${high.length} high priority items.`,\n  skip: false\n};"
+      },
+      "id": "format-digest",
+      "name": "Format Security Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-should-send",
+      "name": "Check Should Send",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.DISCORD_WEBHOOK_SECURITY || 'https://discord.com/api/webhooks/...' }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"{{ $json.content }}\",\n  \"embeds\": {{ JSON.stringify($json.embeds) }}\n}",
+        "options": {}
+      },
+      "id": "send-to-discord-digest",
+      "name": "Send to Discord (Digest)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle Discord commands\nconst message = ($json.messageContent || '').trim();\nconst userId = $json.userId;\nconst userName = $json.userName;\n\nif (!message.startsWith('!')) {\n  return {\n    skip: true,\n    reason: 'Not a command'\n  };\n}\n\n// Parse command\nconst parts = message.substring(1).split(' ');\nconst command = parts[0].toLowerCase();\nconst args = parts.slice(1);\n\nconst validCommands = {\n  'help': 'Show available commands',\n  'search': 'Search for vulnerabilities: !search <keyword>',\n  'subscribe': 'Subscribe to notifications: !subscribe <category>',\n  'unsubscribe': 'Unsubscribe from notifications: !unsubscribe <category>',\n  'stats': 'Show your bug bounty stats',\n  'leaderboard': 'Show community leaderboard',\n  'report': 'Submit a vulnerability report',\n  'learning': 'Get your learning path progress'\n};\n\nreturn {\n  ...($json),\n  command: command,\n  args: args,\n  validCommand: Object.keys(validCommands).includes(command),\n  commandList: validCommands,\n  skip: false\n};"
+      },
+      "id": "parse-command",
+      "name": "Parse Discord Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.validCommand }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "validate-command",
+      "name": "Validate Command",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Execute command logic\nconst command = $json.command;\nconst args = $json.args;\nconst userId = $json.userId;\nconst userName = $json.userName;\n\nlet response = {\n  embeds: [],\n  content: ''\n};\n\nswitch (command) {\n  case 'help':\n    response.embeds.push({\n      title: '🤖 Bot Commands',\n      description: 'Available commands for Bug Bounty KSP Bot',\n      color: 3447003,\n      fields: Object.entries($json.commandList).map(([cmd, desc]) => ({\n        name: `!${cmd}`,\n        value: desc,\n        inline: false\n      }))\n    });\n    break;\n    \n  case 'search':\n    if (args.length === 0) {\n      response.content = '❌ Please provide a search keyword. Usage: `!search <keyword>`';\n    } else {\n      response.searchKeyword = args.join(' ');\n      response.needsSearch = true;\n    }\n    break;\n    \n  case 'subscribe':\n    if (args.length === 0) {\n      response.content = '❌ Please specify a category. Usage: `!subscribe <vulnerability|bug-bounty|exploit|patch>`';\n    } else {\n      response.subscribeCategory = args[0];\n      response.needsSubscribe = true;\n    }\n    break;\n    \n  case 'unsubscribe':\n    if (args.length === 0) {\n      response.content = '❌ Please specify a category. Usage: `!unsubscribe <category>`';\n    } else {\n      response.unsubscribeCategory = args[0];\n      response.needsUnsubscribe = true;\n    }\n    break;\n    \n  case 'stats':\n    response.needsStats = true;\n    break;\n    \n  case 'leaderboard':\n    response.needsLeaderboard = true;\n    break;\n    \n  case 'report':\n    response.embeds.push({\n      title: '📝 Submit Vulnerability Report',\n      description: 'To submit a vulnerability report, please use our web form or API endpoint.',\n      color: 15105570,\n      fields: [\n        {\n          name: 'Web Form',\n          value: '[Submit Report](https://bugbounty.com/submit)',\n          inline: true\n        },\n        {\n          name: 'API',\n          value: 'POST /api/vulnerabilities',\n          inline: true\n        }\n      ]\n    });\n    break;\n    \n  case 'learning':\n    response.needsLearningPath = true;\n    break;\n    \n  default:\n    response.content = '❌ Unknown command. Type `!help` for available commands.';\n}\n\nreturn {\n  ...($json),\n  response: response\n};"
+      },
+      "id": "execute-command",
+      "name": "Execute Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT title, url, description, category, severity, created_at\nFROM security_aggregations\nWHERE title ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%'\nORDER BY created_at DESC\nLIMIT 10;",
+        "additionalFields": {
+          "queryParameters": "={{ $json.response.searchKeyword }}"
+        }
+      },
+      "id": "search-vulnerabilities",
+      "name": "Search Vulnerabilities",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1450, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      },
+      "executeOnce": false,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format search results or command response\nconst commandData = $input.first().json;\nconst searchResults = $input.all().slice(1).map(item => item.json);\n\nlet finalResponse = commandData.response;\n\n// Handle search results\nif (commandData.response.needsSearch && searchResults.length > 0) {\n  const resultsText = searchResults.slice(0, 5).map((item, idx) => \n    `${idx + 1}. **${item.title}**\\n` +\n    `   ${item.severity ? '`' + item.severity + '`' : ''} ${item.category ? '`' + item.category + '`' : ''}\\n` +\n    `   ${item.description.substring(0, 100)}...\\n` +\n    `   [Link](${item.url})`\n  ).join('\\n\\n');\n  \n  finalResponse.embeds.push({\n    title: `🔍 Search Results for \"${commandData.response.searchKeyword}\"`,\n    description: resultsText || 'No results found',\n    color: 3447003,\n    footer: {\n      text: `Found ${searchResults.length} results`\n    }\n  });\n  finalResponse.content = `Found ${searchResults.length} results for \"${commandData.response.searchKeyword}\"`;\n}\n\n// Handle stats (mock data for now)\nif (commandData.response.needsStats) {\n  finalResponse.embeds.push({\n    title: `📊 Stats for ${commandData.userName}`,\n    color: 3066993,\n    fields: [\n      { name: 'Vulnerabilities Found', value: '12', inline: true },\n      { name: 'Bounties Earned', value: '$2,500', inline: true },\n      { name: 'Reputation Score', value: '847', inline: true },\n      { name: 'Learning Progress', value: '65%', inline: true },\n      { name: 'Community Rank', value: '#42', inline: true },\n      { name: 'Active Days', value: '87', inline: true }\n    ]\n  });\n  finalResponse.content = `Here are your stats, ${commandData.userName}! 🎯`;\n}\n\n// Handle leaderboard (mock data)\nif (commandData.response.needsLeaderboard) {\n  finalResponse.embeds.push({\n    title: '🏆 Community Leaderboard',\n    description: 'Top bug bounty hunters this month',\n    color: 15844367,\n    fields: [\n      { name: '🥇 1st Place', value: 'HackerOne ($15,000 | 42 vulns)', inline: false },\n      { name: '🥈 2nd Place', value: 'SecurityPro ($12,500 | 38 vulns)', inline: false },\n      { name: '🥉 3rd Place', value: 'BugHunter ($10,000 | 35 vulns)', inline: false },\n      { name: '4th Place', value: 'WhiteHat ($8,500 | 30 vulns)', inline: false },\n      { name: '5th Place', value: 'CyberNinja ($7,000 | 28 vulns)', inline: false }\n    ]\n  });\n  finalResponse.content = 'Here\\'s the current leaderboard! 🏆';\n}\n\n// Handle learning path\nif (commandData.response.needsLearningPath) {\n  finalResponse.embeds.push({\n    title: '📚 Your Learning Path Progress',\n    color: 9807270,\n    fields: [\n      { name: 'Current Milestone', value: 'Web Application Security Fundamentals', inline: false },\n      { name: 'Progress', value: '4/7 milestones completed (57%)', inline: false },\n      { name: 'Next Up', value: 'Advanced SQL Injection Techniques', inline: false },\n      { name: 'Estimated Time Remaining', value: '8 weeks', inline: true },\n      { name: 'Resources Completed', value: '24/42', inline: true }\n    ]\n  });\n  finalResponse.content = `Great progress, ${commandData.userName}! Keep it up! 🚀`;\n}\n\n// Handle subscribe/unsubscribe\nif (commandData.response.needsSubscribe) {\n  finalResponse.content = `✅ Successfully subscribed to **${commandData.response.subscribeCategory}** notifications!`;\n}\n\nif (commandData.response.needsUnsubscribe) {\n  finalResponse.content = `✅ Successfully unsubscribed from **${commandData.response.unsubscribeCategory}** notifications!`;\n}\n\nreturn {\n  ...commandData,\n  finalResponse: finalResponse\n};"
+      },
+      "id": "format-response",
+      "name": "Format Command Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://discord.com/api/v10/channels/{{ $json.channelId }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bot {{ $env.DISCORD_BOT_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.finalResponse) }}",
+        "options": {}
+      },
+      "id": "send-discord-response",
+      "name": "Send Discord Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1850, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "discord-bot-auth",
+          "name": "Discord Bot Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://discord.com/api/v10/channels/{{ $json.channelId }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bot {{ $env.DISCORD_BOT_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"❌ Invalid command. Type `!help` for available commands.\"\n}",
+        "options": {}
+      },
+      "id": "send-invalid-command",
+      "name": "Send Invalid Command Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1250, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "discord-bot-auth",
+          "name": "Discord Bot Header Auth"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Trigger (Discord Events)": {
+      "main": [
+        [
+          {
+            "node": "Route Trigger Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger (Digest)": {
+      "main": [
+        [
+          {
+            "node": "Route Trigger Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Trigger Type": {
+      "main": [
+        [
+          {
+            "node": "Check Trigger Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Trigger Type": {
+      "main": [
+        [
+          {
+            "node": "Fetch Digest Content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Discord Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Digest Content": {
+      "main": [
+        [
+          {
+            "node": "Format Security Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Security Digest": {
+      "main": [
+        [
+          {
+            "node": "Check Should Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Should Send": {
+      "main": [
+        [
+          {
+            "node": "Send to Discord (Digest)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Discord Command": {
+      "main": [
+        [
+          {
+            "node": "Validate Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Command": {
+      "main": [
+        [
+          {
+            "node": "Execute Command",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Invalid Command Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Command": {
+      "main": [
+        [
+          {
+            "node": "Search Vulnerabilities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Vulnerabilities": {
+      "main": [
+        [
+          {
+            "node": "Format Command Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Command Response": {
+      "main": [
+        [
+          {
+            "node": "Send Discord Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1.0.0",
+  "meta": {
+    "instanceId": "bug-bounty-ksp"
+  },
+  "tags": [
+    {
+      "name": "discord",
+      "id": "discord"
+    },
+    {
+      "name": "community",
+      "id": "community"
+    },
+    {
+      "name": "bot",
+      "id": "bot"
+    }
+  ]
+}

@@ -1,0 +1,391 @@
+{
+  "name": "Workflow 3: Comment Notification Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "comment-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger (Comment)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "comment-notification"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract comment data from webhook payload\nconst payload = $input.first().json;\n\nreturn {\n  commentId: payload.commentId || payload.id,\n  postId: payload.postId || payload.post_id,\n  postTitle: payload.postTitle || payload.post_title,\n  postUrl: payload.postUrl || payload.post_url,\n  authorId: payload.authorId || payload.author_id,\n  authorName: payload.authorName || payload.author_name || 'Anonymous',\n  authorEmail: payload.authorEmail || payload.author_email,\n  commentText: payload.commentText || payload.comment || payload.text,\n  parentCommentId: payload.parentCommentId || payload.parent_id || null,\n  receivedAt: new Date().toISOString(),\n  status: 'pending_moderation'\n};"
+      },
+      "id": "extract-comment-data",
+      "name": "Extract Comment Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Spam detection logic\nconst comment = $json.commentText || '';\nconst authorName = $json.authorName || '';\nconst authorEmail = $json.authorEmail || '';\n\nlet spamScore = 0;\nlet spamReasons = [];\n\n// Check for spam indicators\nconst spamKeywords = ['viagra', 'casino', 'poker', 'lottery', 'click here', 'buy now', 'limited offer', 'earn money fast'];\nconst suspiciousPatterns = [\n  /https?:\\/\\/[^\\s]+/gi,  // Multiple URLs\n  /(.)\\1{4,}/gi,          // Repeated characters\n  /[A-Z]{10,}/g           // Excessive caps\n];\n\n// Keyword check\nspamKeywords.forEach(keyword => {\n  if (comment.toLowerCase().includes(keyword)) {\n    spamScore += 20;\n    spamReasons.push(`Contains spam keyword: ${keyword}`);\n  }\n});\n\n// URL density check\nconst urls = comment.match(/https?:\\/\\/[^\\s]+/gi) || [];\nif (urls.length > 3) {\n  spamScore += 30;\n  spamReasons.push(`Too many URLs: ${urls.length}`);\n}\n\n// Pattern checks\nsuspiciousPatterns.forEach((pattern, idx) => {\n  if (pattern.test(comment)) {\n    spamScore += 15;\n    if (idx === 1) spamReasons.push('Repeated characters detected');\n    if (idx === 2) spamReasons.push('Excessive capitalization');\n  }\n});\n\n// Short comment with URL\nif (comment.length < 20 && urls.length > 0) {\n  spamScore += 25;\n  spamReasons.push('Very short comment with URL');\n}\n\n// Suspicious email patterns\nif (authorEmail && (authorEmail.includes('.ru') || authorEmail.includes('.cn') || authorEmail.match(/[0-9]{8,}/))) {\n  spamScore += 10;\n  spamReasons.push('Suspicious email pattern');\n}\n\n// Determine status\nlet status = 'approved';\nlet action = 'notify';\n\nif (spamScore >= 50) {\n  status = 'spam';\n  action = 'block';\n} else if (spamScore >= 25) {\n  status = 'requires_review';\n  action = 'review';\n}\n\nreturn {\n  ...$json,\n  spamScore: spamScore,\n  spamReasons: spamReasons,\n  status: status,\n  action: action,\n  checkedAt: new Date().toISOString()\n};"
+      },
+      "id": "spam-detection",
+      "name": "Spam Detection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "block",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-spam",
+      "name": "Filter Spam",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO comments (comment_id, post_id, author_id, author_name, author_email, comment_text, parent_comment_id, spam_score, status, created_at)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())\nON CONFLICT (comment_id) DO UPDATE\nSET status = $9, spam_score = $8, updated_at = NOW();",
+        "additionalFields": {
+          "queryParameters": "={{ $json.commentId }},={{ $json.postId }},={{ $json.authorId }},={{ $json.authorName }},={{ $json.authorEmail }},={{ $json.commentText }},={{ $json.parentCommentId }},={{ $json.spamScore }},={{ $json.status }}"
+        }
+      },
+      "id": "store-comment",
+      "name": "Store Comment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1050, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT u.user_id, u.email, u.notification_preferences, p.title as post_title, p.url as post_url\nFROM users u\nJOIN blog_posts p ON p.post_id = $1\nWHERE u.user_id = p.user_id AND u.notification_preferences->>'comments' = 'true';",
+        "additionalFields": {
+          "queryParameters": "={{ $json.postId }}"
+        }
+      },
+      "id": "get-post-author",
+      "name": "Get Post Author",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1050, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare notification data\nconst comment = $input.first().json;\nconst author = $input.last().json;\n\nif (!author || !author.email) {\n  return {\n    skip: true,\n    reason: 'No notification email found or notifications disabled'\n  };\n}\n\nreturn {\n  recipientEmail: author.email,\n  recipientName: author.user_id,\n  postTitle: comment.postTitle || author.post_title,\n  postUrl: comment.postUrl || author.post_url,\n  commentAuthor: comment.authorName,\n  commentText: comment.commentText,\n  commentId: comment.commentId,\n  requiresReview: comment.action === 'review',\n  notificationType: 'new_comment'\n};"
+      },
+      "id": "prepare-notification",
+      "name": "Prepare Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-should-notify",
+      "name": "Check Should Notify",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.NOTIFICATION_FROM_EMAIL || 'noreply@bugbounty.com' }}",
+        "toEmail": "={{ $json.recipientEmail }}",
+        "subject": "=New comment on your post: {{ $json.postTitle }}",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }\n    .container { max-width: 600px; margin: 0 auto; padding: 20px; }\n    .header { background: #0066cc; color: white; padding: 20px; border-radius: 5px 5px 0 0; }\n    .content { background: #f9f9f9; padding: 20px; border: 1px solid #ddd; }\n    .comment { background: white; padding: 15px; margin: 15px 0; border-left: 4px solid #0066cc; }\n    .button { display: inline-block; padding: 12px 24px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px; margin: 10px 0; }\n    .footer { padding: 20px; text-align: center; color: #666; font-size: 12px; }\n    .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin: 10px 0; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\">\n      <h2>💬 New Comment Notification</h2>\n    </div>\n    <div class=\"content\">\n      <p>Hello {{ $json.recipientName }},</p>\n      <p><strong>{{ $json.commentAuthor }}</strong> left a comment on your post:</p>\n      <p><strong>{{ $json.postTitle }}</strong></p>\n      \n      {{ $json.requiresReview ? '<div class=\"warning\">⚠️ <strong>This comment requires moderation review</strong></div>' : '' }}\n      \n      <div class=\"comment\">\n        <p>{{ $json.commentText }}</p>\n      </div>\n      \n      <a href=\"{{ $json.postUrl }}#comment-{{ $json.commentId }}\" class=\"button\">View Comment</a>\n      {{ $json.requiresReview ? '<a href=\"' + $json.postUrl + '/moderate\" class=\"button\">Moderate Comment</a>' : '' }}\n    </div>\n    <div class=\"footer\">\n      <p>You received this email because you have comment notifications enabled.</p>\n      <p><a href=\"{{ $json.postUrl }}/unsubscribe\">Unsubscribe from comment notifications</a></p>\n    </div>\n  </div>\n</body>\n</html>",
+        "options": {}
+      },
+      "id": "send-email-notification",
+      "name": "Send Email Notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1650, 200],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-main",
+          "name": "SMTP Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"💬 New Comment\",\n  \"blocks\": [\n    {\n      \"type\": \"header\",\n      \"text\": {\n        \"type\": \"plain_text\",\n        \"text\": \"💬 New Comment on {{ $json.postTitle }}\"\n      }\n    },\n    {\n      \"type\": \"section\",\n      \"fields\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Author:*\\n{{ $json.commentAuthor }}\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Status:*\\n{{ $json.requiresReview ? '⚠️ Requires Review' : '✅ Approved' }}\"\n        }\n      ]\n    },\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"{{ $json.commentText }}\"\n      }\n    },\n    {\n      \"type\": \"actions\",\n      \"elements\": [\n        {\n          \"type\": \"button\",\n          \"text\": {\n            \"type\": \"plain_text\",\n            \"text\": \"View Comment\"\n          },\n          \"url\": \"{{ $json.postUrl }}#comment-{{ $json.commentId }}\"\n        }\n      ]\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "notify-slack",
+      "name": "Notify Slack (Optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1650, 400]
+    },
+    {
+      "parameters": {
+        "content": "=Comment received and processed successfully.\n\nComment ID: {{ $json.commentId }}\nStatus: {{ $json.status }}\nAction: {{ $json.action }}",
+        "respondWith": "text",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blocked_comments (comment_id, author_name, author_email, comment_text, spam_score, spam_reasons, blocked_at)\nVALUES ($1, $2, $3, $4, $5, $6, NOW());",
+        "additionalFields": {
+          "queryParameters": "={{ $json.commentId }},={{ $json.authorName }},={{ $json.authorEmail }},={{ $json.commentText }},={{ $json.spamScore }},={{ JSON.stringify($json.spamReasons) }}"
+        }
+      },
+      "id": "log-spam",
+      "name": "Log Spam",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1050, 600],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "=Comment blocked as spam.\n\nSpam Score: {{ $json.spamScore }}\nReasons: {{ $json.spamReasons.join(', ') }}",
+        "respondWith": "text",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "respond-spam",
+      "name": "Respond Spam",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1250, 600]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger (Comment)": {
+      "main": [
+        [
+          {
+            "node": "Extract Comment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Comment Data": {
+      "main": [
+        [
+          {
+            "node": "Spam Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spam Detection": {
+      "main": [
+        [
+          {
+            "node": "Filter Spam",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Spam": {
+      "main": [
+        [
+          {
+            "node": "Store Comment",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Post Author",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Spam",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Comment": {
+      "main": [
+        [
+          {
+            "node": "Prepare Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Post Author": {
+      "main": [
+        [
+          {
+            "node": "Prepare Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Notification": {
+      "main": [
+        [
+          {
+            "node": "Check Should Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Should Notify": {
+      "main": [
+        [
+          {
+            "node": "Send Email Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify Slack (Optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email Notification": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Slack (Optional)": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Spam": {
+      "main": [
+        [
+          {
+            "node": "Respond Spam",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1.0.0",
+  "meta": {
+    "instanceId": "bug-bounty-ksp"
+  },
+  "tags": [
+    {
+      "name": "notifications",
+      "id": "notify"
+    },
+    {
+      "name": "comments",
+      "id": "comments"
+    },
+    {
+      "name": "spam-detection",
+      "id": "spam"
+    }
+  ]
+}

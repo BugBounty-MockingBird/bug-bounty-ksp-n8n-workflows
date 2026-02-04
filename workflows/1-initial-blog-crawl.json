@@ -1,0 +1,288 @@
+{
+  "name": "Workflow 1: Initial Blog Crawl (One-time per User)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "start-blog-crawl",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "blog-crawl-init"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract user info and blog URL from webhook\nconst userId = $input.first().json.userId;\nconst blogUrl = $input.first().json.blogUrl;\nconst userName = $input.first().json.userName || 'Anonymous';\n\n// Validate inputs\nif (!userId || !blogUrl) {\n  throw new Error('Missing required parameters: userId and blogUrl');\n}\n\n// Prepare crawl configuration\nreturn {\n  userId: userId,\n  blogUrl: blogUrl,\n  userName: userName,\n  crawlId: `crawl_${userId}_${Date.now()}`,\n  startTime: new Date().toISOString(),\n  status: 'initiated'\n};"
+      },
+      "id": "validate-input",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.blogUrl }}",
+        "authentication": "none",
+        "options": {
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 5
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "fetch-blog-page",
+      "name": "Fetch Blog Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse HTML to extract blog posts\nconst html = $input.first().json.data || $input.first().binary?.data?.toString() || '';\n\n// Simple regex-based extraction (in production, use proper HTML parser)\nconst postRegex = /<article[^>]*>([\\s\\S]*?)<\\/article>/gi;\nconst titleRegex = /<h[1-3][^>]*>([^<]+)<\\/h[1-3]>/i;\nconst linkRegex = /<a[^>]*href=[\"']([^\"']+)[\"'][^>]*>/i;\nconst dateRegex = /<time[^>]*datetime=[\"']([^\"']+)[\"'][^>]*>/i;\n\nconst posts = [];\nlet match;\n\nwhile ((match = postRegex.exec(html)) !== null) {\n  const articleHtml = match[1];\n  \n  const titleMatch = titleRegex.exec(articleHtml);\n  const linkMatch = linkRegex.exec(articleHtml);\n  const dateMatch = dateRegex.exec(articleHtml);\n  \n  if (titleMatch && linkMatch) {\n    posts.push({\n      title: titleMatch[1].trim(),\n      url: linkMatch[1],\n      date: dateMatch ? dateMatch[1] : null,\n      content: articleHtml.substring(0, 500) // Preview\n    });\n  }\n}\n\n// If no posts found using article tags, try alternative selectors\nif (posts.length === 0) {\n  const h2Regex = /<h2[^>]*>([^<]+)<\\/h2>/gi;\n  const matches = [...html.matchAll(h2Regex)];\n  matches.forEach((m, idx) => {\n    posts.push({\n      title: m[1].trim(),\n      url: $json.blogUrl + '#post-' + idx,\n      date: null,\n      content: 'Extracted heading only'\n    });\n  });\n}\n\nreturn {\n  userId: $json.userId,\n  userName: $json.userName,\n  blogUrl: $json.blogUrl,\n  crawlId: $json.crawlId,\n  postsFound: posts.length,\n  posts: posts,\n  crawledAt: new Date().toISOString(),\n  status: 'completed'\n};"
+      },
+      "id": "parse-blog-posts",
+      "name": "Parse Blog Posts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.postsFound }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-posts-found",
+      "name": "Check Posts Found",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blog_crawls (user_id, blog_url, crawl_id, posts_found, crawl_data, status, created_at)\nVALUES ($1, $2, $3, $4, $5, $6, NOW())\nON CONFLICT (user_id, blog_url) DO UPDATE\nSET crawl_id = $3, posts_found = $4, crawl_data = $5, status = $6, updated_at = NOW();",
+        "additionalFields": {
+          "queryParameters": "={{ $json.userId }},{{ $json.blogUrl }},{{ $json.crawlId }},{{ $json.postsFound }},{{ JSON.stringify($json.posts) }},{{ $json.status }}"
+        }
+      },
+      "id": "store-crawl-results",
+      "name": "Store Crawl Results",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1250, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process individual posts for storing in database\nconst posts = $json.posts || [];\nconst userId = $json.userId;\nconst crawlId = $json.crawlId;\n\nreturn posts.map(post => ({\n  userId: userId,\n  crawlId: crawlId,\n  title: post.title,\n  url: post.url,\n  publishDate: post.date,\n  content: post.content,\n  isNew: true\n}));"
+      },
+      "id": "split-posts",
+      "name": "Split Posts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blog_posts (user_id, crawl_id, title, url, publish_date, content, is_new, created_at)\nVALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\nON CONFLICT (user_id, url) DO UPDATE\nSET is_new = FALSE, last_seen_at = NOW();",
+        "additionalFields": {
+          "queryParameters": "={{ $json.userId }},={{ $json.crawlId }},={{ $json.title }},={{ $json.url }},={{ $json.publishDate }},={{ $json.content }},={{ $json.isNew }}"
+        }
+      },
+      "id": "store-individual-posts",
+      "name": "Store Individual Posts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1450, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "PostgreSQL Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "=Blog crawl completed for {{ $json.userName }}!\n\n✅ **Successfully crawled**: {{ $json.blogUrl }}\n📊 **Posts found**: {{ $json.postsFound }}\n🆔 **Crawl ID**: {{ $json.crawlId }}\n\nAll posts have been indexed and stored in the database.",
+        "respondWith": "text",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1650, 200]
+    },
+    {
+      "parameters": {
+        "content": "=Blog crawl completed but no posts were found at {{ $json.blogUrl }}.\n\nThis could mean:\n- The blog has no posts yet\n- The blog structure is not supported\n- The URL may be incorrect\n\nPlease verify the blog URL and try again.",
+        "respondWith": "text",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-no-posts",
+      "name": "Respond No Posts",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1250, 600]
+    },
+    {
+      "parameters": {
+        "content": "=Error during blog crawl: {{ $json.error || 'Unknown error' }}\n\nPlease check your blog URL and try again.",
+        "respondWith": "text",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "respond-error",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [650, 500]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Fetch Blog Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Blog Page": {
+      "main": [
+        [
+          {
+            "node": "Parse Blog Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Blog Posts": {
+      "main": [
+        [
+          {
+            "node": "Check Posts Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Posts Found": {
+      "main": [
+        [
+          {
+            "node": "Store Crawl Results",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Posts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond No Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Crawl Results": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Posts": {
+      "main": [
+        [
+          {
+            "node": "Store Individual Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1.0.0",
+  "meta": {
+    "instanceId": "bug-bounty-ksp"
+  },
+  "tags": [
+    {
+      "name": "blog-crawl",
+      "id": "crawl"
+    },
+    {
+      "name": "one-time",
+      "id": "onetime"
+    }
+  ]
+}
